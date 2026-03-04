@@ -390,7 +390,10 @@ tr:hover td { background: var(--surface2); }
     <label>Adresse email</label>
     <input type="text" id="login-email" placeholder="identifiant (ex: fc999)" onkeydown="if(event.key==='Enter')login()" autocomplete="username" autocapitalize="none">
     <label>Mot de passe</label>
-    <input type="password" id="login-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()">
+    <div style="position:relative">
+      <input type="password" id="login-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')login()" style="padding-right:40px">
+      <span onclick="togglePwd()" id="pwd-eye" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:18px;user-select:none;opacity:0.6">👁</span>
+    </div>
     <button class="login-btn" onclick="login()" id="login-btn">Se connecter</button>
     <div class="login-error" id="login-error"></div>
   </div>
@@ -510,106 +513,141 @@ const SUPABASE_URL = 'https://xwcnbgapjkgbtpgfyjeb.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_Ha0c3gxGVjG-_dLv6qehlw_y69_oN9B';
 
 let currentUser = null;
+let accessToken = null;
 let currentPage = 1;
 const PAGE_SIZE = 10;
 let allClients = [];
 let filteredClients = [];
 
-// ===== AUTH =====
+function getHeaders(){
+  return {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${accessToken||SUPABASE_KEY}`};
+}
+
+function togglePwd(){
+  const inp=document.getElementById('login-password');
+  const eye=document.getElementById('pwd-eye');
+  if(inp.type==='password'){inp.type='text';eye.textContent='🙈';}
+  else{inp.type='password';eye.textContent='👁';}
+}
+
+// ===== AUTH (Hybrid: try Supabase Auth first, fallback to password check) =====
 async function login() {
   let raw = document.getElementById('login-email').value.trim().toLowerCase();
   const password = document.getElementById('login-password').value;
-  const errorEl = document.getElementById('login-error');
   const btn = document.getElementById('login-btn');
-
-  if (!raw || !password) {
-    showError('Veuillez remplir tous les champs.');
-    return;
-  }
-
-  btn.textContent = 'Connexion...';
-  btn.disabled = true;
-  errorEl.style.display = 'none';
-
+  document.getElementById('login-error').style.display = 'none';
+  if (!raw || !password) { showError('Veuillez remplir tous les champs.'); return; }
+  btn.textContent = 'Connexion...'; btn.disabled = true;
+  
+  const headers = {'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`};
+  
   try {
-    const personne = await findPersonne(raw);
-    if (!personne) {
-      showError('Email introuvable ou accès non autorisé.');
-      btn.textContent = 'Se connecter';
-      btn.disabled = false;
-      return;
+    // Resolve email
+    let email = raw.includes('@') ? raw : raw + '@aaaww.top';
+    if (!raw.includes('@')) {
+      try {
+        const r1 = await fetch(`${SUPABASE_URL}/rest/v1/personnes?login=eq.${encodeURIComponent(raw)}&est_intermediaire=eq.true&select=email`, {headers});
+        const d1 = await r1.json();
+        if (d1 && d1.length > 0) email = d1[0].email;
+      } catch(e) {}
     }
 
-    const ADMIN_PASSWORD = 'FuwuAdmin2026!';
-    const validPasswords = ['Fuwu2024', 'fuwu2024'];
-    const isAdminLogin = (password === ADMIN_PASSWORD);
-    const isValidHash = personne.password_hash && personne.password_hash === password;
-    const isDefaultPass = validPasswords.includes(password);
-    const isNullHash = !personne.password_hash;
-
-    if (!isAdminLogin && !isValidHash && !isDefaultPass && !(isNullHash && validPasswords.includes(password))) {
-      if (!isNullHash || (!isDefaultPass && !isAdminLogin)) {
-        showError('Mot de passe incorrect.');
-        btn.textContent = 'Se connecter';
-        btn.disabled = false;
-        return;
+    // Try Supabase Auth first
+    let authOk = false;
+    try {
+      const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: {'apikey':SUPABASE_KEY,'Content-Type':'application/json'},
+        body: JSON.stringify({email, password})
+      });
+      const data = await r.json();
+      if (r.ok && data.access_token) {
+        accessToken = data.access_token;
+        authOk = true;
+        localStorage.setItem('fuwu_interm_session', JSON.stringify({
+          access_token: data.access_token, refresh_token: data.refresh_token,
+          expires_at: Date.now() + data.expires_in * 1000, user_id: data.user.id
+        }));
       }
+    } catch(e) {}
+
+    // Find personne record
+    const rp = await fetch(`${SUPABASE_URL}/rest/v1/personnes?email=ilike.${encodeURIComponent(email)}&est_intermediaire=eq.true&select=*`, {headers: getHeaders()});
+    const pd = await rp.json();
+    if (!pd || pd.length === 0) {
+      showError('Compte introuvable.'); btn.textContent = 'Se connecter'; btn.disabled = false; return;
+    }
+    const personne = pd[0];
+
+    // If Auth didn't work, fallback to password check
+    if (!authOk) {
+      const ADMIN_PASSWORD = 'FuwuAdmin2026!';
+      const validPasswords = ['Fuwu2024', 'fuwu2024'];
+      const isAdmin = password === ADMIN_PASSWORD;
+      const isValidHash = personne.password_hash && personne.password_hash === password;
+      const isDefault = validPasswords.includes(password);
+      const isNullHash = !personne.password_hash;
+
+      if (!isAdmin && !isValidHash && !isDefault && !(isNullHash && isDefault)) {
+        showError('Mot de passe incorrect.'); btn.textContent = 'Se connecter'; btn.disabled = false; return;
+      }
+      // Save session with simple token
+      localStorage.setItem('fuwu_interm_session', JSON.stringify({
+        personne_id: personne.id, ts: Date.now()
+      }));
     }
 
-    localStorage.setItem('fuwu_interm', JSON.stringify({id: personne.id, ts: Date.now()}));
     currentUser = personne;
     showDashboard();
-
-  } catch(e) {
-    showError('Erreur de connexion. Réessayez.');
-    btn.textContent = 'Se connecter';
-    btn.disabled = false;
-  }
-}
-
-async function findPersonne(raw) {
-  const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
-  // 1. Chercher par login
-  const r1 = await fetch(
-    `${SUPABASE_URL}/rest/v1/personnes?login=eq.${encodeURIComponent(raw)}&est_intermediaire=eq.true&select=*`,
-    { headers }
-  );
-  let data = await r1.json();
-  if (data && data.length > 0) return data[0];
-  // 2. Fallback: par email
-  const email = raw.includes('@') ? raw : raw + '@aaaww.top';
-  const r2 = await fetch(
-    `${SUPABASE_URL}/rest/v1/personnes?email=ilike.${encodeURIComponent(email)}&est_intermediaire=eq.true&select=*`,
-    { headers }
-  );
-  data = await r2.json();
-  return (data && data.length > 0) ? data[0] : null;
+  } catch(e) { showError('Erreur de connexion.'); btn.textContent = 'Se connecter'; btn.disabled = false; }
 }
 
 async function autoLogin() {
   try {
-    const saved = JSON.parse(localStorage.getItem('fuwu_interm') || 'null');
-    if (!saved || !saved.id) return;
-    if (Date.now() - saved.ts > 7 * 24 * 60 * 60 * 1000) { localStorage.removeItem('fuwu_interm'); return; }
-    const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/personnes?id=eq.${saved.id}&est_intermediaire=eq.true&select=*`, { headers });
-    const data = await r.json();
-    if (!data || data.length === 0) { localStorage.removeItem('fuwu_interm'); return; }
-    currentUser = data[0];
-    showDashboard();
+    const saved = JSON.parse(localStorage.getItem('fuwu_interm_session') || 'null');
+    if (!saved) return;
+
+    // Auth session
+    if (saved.access_token) {
+      if (Date.now() >= (saved.expires_at||0)) {
+        try {
+          const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+            method: 'POST', headers: {'apikey':SUPABASE_KEY,'Content-Type':'application/json'},
+            body: JSON.stringify({refresh_token: saved.refresh_token})
+          });
+          const data = await r.json();
+          if (!r.ok || !data.access_token) { localStorage.removeItem('fuwu_interm_session'); return; }
+          saved.access_token = data.access_token; saved.refresh_token = data.refresh_token;
+          saved.expires_at = Date.now() + data.expires_in * 1000;
+          localStorage.setItem('fuwu_interm_session', JSON.stringify(saved));
+        } catch(e) { localStorage.removeItem('fuwu_interm_session'); return; }
+      }
+      accessToken = saved.access_token;
+      const rp = await fetch(`${SUPABASE_URL}/rest/v1/personnes?auth_uid=eq.${saved.user_id}&select=*`, {headers: getHeaders()});
+      const pd = await rp.json();
+      if (pd && pd.length > 0) { currentUser = pd[0]; showDashboard(); return; }
+    }
+
+    // Fallback session (personne_id based)
+    if (saved.personne_id) {
+      if (Date.now() - (saved.ts||0) > 7*24*60*60*1000) { localStorage.removeItem('fuwu_interm_session'); return; }
+      const rp = await fetch(`${SUPABASE_URL}/rest/v1/personnes?id=eq.${saved.personne_id}&est_intermediaire=eq.true&select=*`, {headers: getHeaders()});
+      const pd = await rp.json();
+      if (pd && pd.length > 0) { currentUser = pd[0]; showDashboard(); return; }
+    }
+
+    localStorage.removeItem('fuwu_interm_session');
   } catch(e) { console.warn('Auto-login failed', e); }
 }
 
 function showError(msg) {
-  const el = document.getElementById('login-error');
-  el.textContent = msg;
-  el.style.display = 'block';
+  const el = document.getElementById('login-error'); el.textContent = msg; el.style.display = 'block';
 }
 
 function logout() {
-  localStorage.removeItem('fuwu_interm');
-  currentUser = null;
-  allClients = [];
+  if (accessToken) try { fetch(`${SUPABASE_URL}/auth/v1/logout`, {method:'POST', headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${accessToken}`}}); } catch(e){}
+  localStorage.removeItem('fuwu_interm_session');
+  currentUser = null; accessToken = null; allClients = [];
   document.getElementById('login-screen').style.display = 'flex';
   document.getElementById('dashboard').style.display = 'none';
   document.getElementById('login-email').value = '';
@@ -618,8 +656,8 @@ function logout() {
   document.getElementById('login-btn').disabled = false;
 }
 
-// Auto-login on page load
 autoLogin();
+
 
 // ===== DASHBOARD =====
 async function showDashboard() {
@@ -640,7 +678,7 @@ async function loadAllData() {
   document.getElementById('table-content').style.display = 'none';
 
   try {
-    const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+    const headers = getHeaders();
     const email = currentUser.email;
     let contrats = [];
     let offset = 0;
@@ -982,7 +1020,7 @@ async function showPaymentManager() {
   overlay.style.display = 'flex';
   document.getElementById('payment-body').innerHTML = '<div style="text-align:center;padding:40px;color:#999">Chargement...</div>';
   
-  const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+  const headers = getHeaders();
   try {
     // Get all commissions for this intermediaire
     const r = await fetch(
