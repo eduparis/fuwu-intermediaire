@@ -711,7 +711,7 @@ async function loadAllData() {
     const commBatch = 1000;
     while (true) {
       const commRes = await fetch(
-        `${SUPABASE_URL}/rest/v1/commissions?intermediaire_id=eq.${currentUser.id}&select=id,contrat_id,montant,statut&limit=${commBatch}&offset=${commOffset}`,
+        `${SUPABASE_URL}/rest/v1/commissions?intermediaire_id=eq.${currentUser.id}&contrat_id=not.is.null&select=id,contrat_id,montant,statut&order=id.asc&limit=${commBatch}&offset=${commOffset}`,
         { headers }
       );
       const batch = await commRes.json();
@@ -728,7 +728,15 @@ async function loadAllData() {
       console.warn('⚠️ ZERO commissions found for this user ID');
     }
     const commMap = {};
-    if (Array.isArray(commissions)) commissions.forEach(c => { commMap[c.contrat_id] = c; });
+    // Build set of valid contrat IDs
+    const validContratIds = new Set(contrats.map(c => c.id));
+    if (Array.isArray(commissions)) {
+      const seen = new Set();
+      commissions
+        .filter(c => { if(seen.has(c.id)) return false; seen.add(c.id); return true; })
+        .filter(c => validContratIds.has(c.contrat_id))
+        .forEach(c => { commMap[c.contrat_id] = c; });
+    }
     // Charger adresses
     const adresseIds = [...new Set(contrats.map(c => c.adresse_id).filter(Boolean))];
     let adressesMap = {};
@@ -869,7 +877,7 @@ function updateStats() {
   const totalComm = hasFilter ? totalCommPeriode : totalCommAll;
   const payeComm  = hasFilter ? payeCommPeriode  : payeCommAll;
 
-  document.getElementById('stat-total').textContent = allClients.length;
+  document.getElementById('stat-total').textContent = allClients.filter(c => c._commission).length;
   document.getElementById('stat-mois').textContent = periodeClients.length;
   document.getElementById('stat-comm-total').textContent = totalComm > 0 ? totalComm.toFixed(0) : '—';
   document.getElementById('stat-comm-paye').textContent = payeComm > 0 ? payeComm.toFixed(0) : '—';
@@ -1022,13 +1030,59 @@ async function showPaymentManager() {
   
   const headers = getHeaders();
   try {
-    // Get all commissions for this intermediaire
+    // 1. Charger les commissions
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/commissions?intermediaire_id=eq.${currentUser.id}&select=id,contrat_id,montant,statut,date_paiement&order=statut.asc`,
+      `${SUPABASE_URL}/rest/v1/commissions?intermediaire_id=eq.${currentUser.id}&contrat_id=not.is.null&select=id,contrat_id,montant,statut&order=statut.asc&limit=500`,
       { headers }
     );
     const comms = await r.json();
-    
+
+    // 2. Charger les contrats associés (avec personne + adresse)
+    const contratIds = [...new Set(comms.map(c => c.contrat_id).filter(Boolean))];
+    let contratInfoMap = {};
+    if (contratIds.length > 0) {
+      // Par lots de 100
+      for (let i = 0; i < contratIds.length; i += 100) {
+        const ids = contratIds.slice(i, i+100).join(',');
+        const rc = await fetch(
+          `${SUPABASE_URL}/rest/v1/contrats?id=in.(${ids})&select=id,id_service,personne_id,adresse_id`,
+          { headers }
+        );
+        const cts = await rc.json();
+        if (Array.isArray(cts)) cts.forEach(ct => { contratInfoMap[ct.id] = ct; });
+      }
+    }
+
+    // 3. Charger les personnes
+    const personneIds = [...new Set(Object.values(contratInfoMap).map(ct => ct.personne_id).filter(Boolean))];
+    let personneMap = {};
+    if (personneIds.length > 0) {
+      for (let i = 0; i < personneIds.length; i += 100) {
+        const ids = personneIds.slice(i, i+100).join(',');
+        const rp = await fetch(
+          `${SUPABASE_URL}/rest/v1/personnes?id=in.(${ids})&select=id,prenom,nom,email`,
+          { headers }
+        );
+        const ps = await rp.json();
+        if (Array.isArray(ps)) ps.forEach(p => { personneMap[p.id] = p; });
+      }
+    }
+
+    // 4. Charger les adresses
+    const adresseIds = [...new Set(Object.values(contratInfoMap).map(ct => ct.adresse_id).filter(Boolean))];
+    let adresseMap = {};
+    if (adresseIds.length > 0) {
+      for (let i = 0; i < adresseIds.length; i += 100) {
+        const ids = adresseIds.slice(i, i+100).join(',');
+        const ra = await fetch(
+          `${SUPABASE_URL}/rest/v1/adresses?id=in.(${ids})&select=id,rue,ville,code_postal,pdl,pce`,
+          { headers }
+        );
+        const as = await ra.json();
+        if (Array.isArray(as)) as.forEach(a => { adresseMap[a.id] = a; });
+      }
+    }
+
     const nonPaye = comms.filter(c => c.statut !== 'paye');
     const paye = comms.filter(c => c.statut === 'paye');
     const totalNon = nonPaye.reduce((s,c) => s + parseFloat(c.montant||0), 0);
@@ -1048,29 +1102,42 @@ async function showPaymentManager() {
         </div>
       </div>
       <p style="font-size:13px;color:#8a8070;margin-bottom:12px">Les paiements sont marqués par l'administrateur. Contactez votre responsable pour toute question.</p>
-      <div style="max-height:300px;overflow-y:auto">
+      <p style="font-size:12px;color:#a09070;margin-bottom:12px">${comms.length} commissions sur ${allClients.length} contrats au total.</p>
+      <div style="max-height:360px;overflow-y:auto">
         <table style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead><tr style="background:#f0ede6">
-            <th style="padding:8px;text-align:left">Contrat</th>
-            <th style="padding:8px;text-align:right">Montant</th>
-            <th style="padding:8px;text-align:center">Statut</th>
-            <th style="padding:8px;text-align:center">Date paiement</th>
+          <thead><tr style="background:#f0ede6;position:sticky;top:0">
+            <th style="padding:8px 10px;text-align:left;font-size:11px;letter-spacing:0.5px">Client · Adresse · PDL</th>
+            <th style="padding:8px;text-align:right;font-size:11px">Montant</th>
+            <th style="padding:8px;text-align:center;font-size:11px">Statut</th>
           </tr></thead>
           <tbody>
-            ${comms.slice(0,100).map(c => `
+            ${comms.slice(0,200).map(c => {
+              const ct = contratInfoMap[c.contrat_id] || {};
+              const p = personneMap[ct.personne_id] || {};
+              const a = adresseMap[ct.adresse_id] || {};
+              const nom = [p.prenom, p.nom].filter(Boolean).join(' ') || '—';
+              const adresse = [a.rue, [a.code_postal, a.ville].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '—';
+              const pdl = a.pdl || a.pce || '—';
+              return `
               <tr style="border-bottom:1px solid #f0ede6">
-                <td style="padding:7px 8px;font-size:12px;color:#8a8070">${c.contrat_id ? c.contrat_id.slice(0,8)+'...' : '—'}</td>
-                <td style="padding:7px 8px;text-align:right;font-weight:600">${parseFloat(c.montant||0).toFixed(0)} €</td>
+                <td style="padding:8px 10px">
+                  <div style="font-weight:600;color:#1a1610;font-size:13px">${nom}</div>
+                  <div style="font-size:11px;color:#8a8070;margin-top:1px">${p.email||''}</div>
+                  <div style="font-size:11px;color:#8a8070">${adresse}</div>
+                  <div style="font-size:11px;color:#a09070;font-family:monospace">PDL ${pdl}</div>
+                </td>
+                <td style="padding:7px 8px;text-align:right;font-weight:700;color:#1a1610">${(parseFloat(c.montant||0)*1.2).toFixed(0)} €</td>
                 <td style="padding:7px 8px;text-align:center">
                   <span style="padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;
                     background:${c.statut==='paye'?'rgba(45,125,79,0.12)':'rgba(200,130,10,0.12)'};
-                    color:${c.statut==='paye'?'#2d7d4f':'#c8820a'}">${c.statut}</span>
+                    color:${c.statut==='paye'?'#2d7d4f':'#c8820a'}">${c.statut==='paye'?'✓ payé':'en attente'}</span>
                 </td>
-                <td style="padding:7px 8px;text-align:center;font-size:12px;color:#8a8070">${c.date_paiement || '—'}</td>
-              </tr>`).join('')}
+
+              </tr>`;
+            }).join('')}
           </tbody>
         </table>
-        ${comms.length > 100 ? `<p style="text-align:center;font-size:12px;color:#8a8070;padding:8px">... et ${comms.length-100} autres</p>` : ''}
+        ${comms.length > 200 ? `<p style="text-align:center;font-size:12px;color:#8a8070;padding:8px">... et ${comms.length-200} autres</p>` : ''}
       </div>`;
   } catch(e) {
     document.getElementById('payment-body').innerHTML = '<div style="color:red;padding:20px">Erreur de chargement</div>';
