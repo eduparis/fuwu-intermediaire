@@ -484,6 +484,7 @@ tr:hover td { background: var(--surface2); }
             <tr>
               <th>Client</th>
               <th>ID Fournisseur</th>
+              <th>ID Fuwu</th>
               <th>Fournisseur</th>
               <th>Adresse</th>
               <th>Date</th>
@@ -709,7 +710,12 @@ async function loadAllData() {
       _adresse: adressesMap[c.adresse_id] || null,
       _commission: commMap[c.id] || null
     }));
-    // Initialiser filteredClients = tous les clients
+    // Sort by date_debut desc (most recent first)
+    allClients.sort((a,b)=>{
+      const da=new Date(a.date_debut||a.created_at||0);
+      const db=new Date(b.date_debut||b.created_at||0);
+      return db-da;
+    });
     filteredClients = [...allClients];
   } catch(e) {
     console.error('Erreur:', e);
@@ -917,6 +923,7 @@ function renderTable() {
         <div class="client-id">${p ? p.email || '' : ''}</div>
       </td>
       <td style="font-size:12px;color:var(--muted);font-family:monospace">${c.id_fournisseur ? String(c.id_fournisseur) : '—'}</td>
+      <td style="font-size:12px;color:var(--muted);font-family:monospace">${c.id_service || '—'}</td>
       <td>${c.fournisseur || '—'}</td>
       <td style="font-size:12px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${adresseStr}">${adresseStr}</td>
       <td>${date}</td>
