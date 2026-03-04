@@ -531,48 +531,22 @@ async function login() {
   errorEl.style.display = 'none';
 
   try {
-    // Chercher d'abord par login, sinon par email (avec ou sans @aaaww.top)
-    let data = null;
-
-    // 1. Chercher par champ login
-    const r1 = await fetch(
-      `${SUPABASE_URL}/rest/v1/personnes?login=eq.${encodeURIComponent(raw)}&est_intermediaire=eq.true&select=*`,
-      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }}
-    );
-    data = await r1.json();
-
-    // 2. Fallback: chercher par email (ajouter @aaaww.top si pas de @)
-    if (!data || data.length === 0) {
-      const email = raw.includes('@') ? raw : raw + '@aaaww.top';
-      const r2 = await fetch(
-        `${SUPABASE_URL}/rest/v1/personnes?email=ilike.${encodeURIComponent(email)}&est_intermediaire=eq.true&select=*`,
-        { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` }}
-      );
-      data = await r2.json();
-    }
-
-    if (!data || data.length === 0) {
+    const personne = await findPersonne(raw);
+    if (!personne) {
       showError('Email introuvable ou accès non autorisé.');
       btn.textContent = 'Se connecter';
       btn.disabled = false;
       return;
     }
 
-    // Vérifier mot de passe (simple hash check - en prod utiliser Supabase Auth)
-    const personne = data[0];
-    // Pour l'instant: accepter si password_hash correspond ou si c'est "Fuwu2024" par défaut
-    // En production: utiliser bcrypt ou Supabase Auth
-    // Mot de passe admin universel (accès à tous les comptes)
     const ADMIN_PASSWORD = 'FuwuAdmin2026!';
     const validPasswords = ['Fuwu2024', 'fuwu2024'];
-
     const isAdminLogin = (password === ADMIN_PASSWORD);
     const isValidHash = personne.password_hash && personne.password_hash === password;
     const isDefaultPass = validPasswords.includes(password);
-    const isNullHash = !personne.password_hash; // NULL hash = accepter mot de passe par défaut
+    const isNullHash = !personne.password_hash;
 
     if (!isAdminLogin && !isValidHash && !isDefaultPass && !(isNullHash && validPasswords.includes(password))) {
-      // Si hash NULL, autoriser avec mot de passe par défaut OU admin
       if (!isNullHash || (!isDefaultPass && !isAdminLogin)) {
         showError('Mot de passe incorrect.');
         btn.textContent = 'Se connecter';
@@ -581,6 +555,7 @@ async function login() {
       }
     }
 
+    localStorage.setItem('fuwu_interm', JSON.stringify({id: personne.id, ts: Date.now()}));
     currentUser = personne;
     showDashboard();
 
@@ -591,6 +566,39 @@ async function login() {
   }
 }
 
+async function findPersonne(raw) {
+  const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+  // 1. Chercher par login
+  const r1 = await fetch(
+    `${SUPABASE_URL}/rest/v1/personnes?login=eq.${encodeURIComponent(raw)}&est_intermediaire=eq.true&select=*`,
+    { headers }
+  );
+  let data = await r1.json();
+  if (data && data.length > 0) return data[0];
+  // 2. Fallback: par email
+  const email = raw.includes('@') ? raw : raw + '@aaaww.top';
+  const r2 = await fetch(
+    `${SUPABASE_URL}/rest/v1/personnes?email=ilike.${encodeURIComponent(email)}&est_intermediaire=eq.true&select=*`,
+    { headers }
+  );
+  data = await r2.json();
+  return (data && data.length > 0) ? data[0] : null;
+}
+
+async function autoLogin() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('fuwu_interm') || 'null');
+    if (!saved || !saved.id) return;
+    if (Date.now() - saved.ts > 7 * 24 * 60 * 60 * 1000) { localStorage.removeItem('fuwu_interm'); return; }
+    const headers = { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` };
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/personnes?id=eq.${saved.id}&est_intermediaire=eq.true&select=*`, { headers });
+    const data = await r.json();
+    if (!data || data.length === 0) { localStorage.removeItem('fuwu_interm'); return; }
+    currentUser = data[0];
+    showDashboard();
+  } catch(e) { console.warn('Auto-login failed', e); }
+}
+
 function showError(msg) {
   const el = document.getElementById('login-error');
   el.textContent = msg;
@@ -598,6 +606,7 @@ function showError(msg) {
 }
 
 function logout() {
+  localStorage.removeItem('fuwu_interm');
   currentUser = null;
   allClients = [];
   document.getElementById('login-screen').style.display = 'flex';
@@ -607,6 +616,9 @@ function logout() {
   document.getElementById('login-btn').textContent = 'Se connecter';
   document.getElementById('login-btn').disabled = false;
 }
+
+// Auto-login on page load
+autoLogin();
 
 // ===== DASHBOARD =====
 async function showDashboard() {
